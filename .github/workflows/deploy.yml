@@ -1,28 +1,45 @@
-name: Test & build for Hostinger
+name: Test and deploy
 
-# On every push to main: run the tests, install production packages,
-# and publish the ready-to-serve result to the "deploy" branch.
-# Hostinger's Git deployment pulls the "deploy" branch (it does not run Composer itself).
+# Same approach as Maysville-HRMS: Hostinger's Git panel doesn't run Composer,
+# so GitHub Actions runs the tests, builds the app (composer --no-dev), rsyncs it
+# into the site folder over SSH, then sets up / migrates / caches over the same
+# connection.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   SSH_PRIVATE_KEY  private key whose public half is added in hPanel → SSH Access → SSH keys
+#   SSH_HOST         37.44.245.42
+#   SSH_PORT         65002
+#   SSH_USER         u175799808
+#   DB_PASSWORD      the MySQL user's password
+#
+# Secrets file: domains/academy.integris.my/academy.env (outside public_html).
+# It is created on the first deploy if missing and never overwritten after that.
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-
-permissions:
-  contents: write
+  workflow_dispatch: {}
 
 concurrency:
   group: deploy
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+env:
+  SITE_DIR: domains/academy.integris.my
+  DEPLOY_PATH: domains/academy.integris.my/public_html
+  REMOTE_PHP: /opt/alt/php83/usr/bin/php
+  DB_DATABASE: u175799808_academy
+  DB_USERNAME: u175799808_academy
 
 jobs:
-  build:
+  test-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: shivammathur/setup-php@v2
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
           extensions: mbstring, intl, pdo_mysql, pdo_sqlite, bcmath, fileinfo
@@ -36,21 +53,106 @@ jobs:
           cp .env.example .env
           php artisan key:generate
           php artisan test
+          rm -f .env
 
       - name: Install production packages only
-        run: |
-          rm -f .env
-          composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-progress
+        run: composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-progress
 
-      - name: Publish to the deploy branch
+      - name: Check deploy secrets
         env:
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          K: ${{ secrets.SSH_PRIVATE_KEY }}
+          H: ${{ secrets.SSH_HOST }}
+          P: ${{ secrets.SSH_PORT }}
+          U: ${{ secrets.SSH_USER }}
+          D: ${{ secrets.DB_PASSWORD }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          sed -i '/^\/vendor$/d' .gitignore
-          rm -rf .github tests phpunit.xml
-          git checkout --orphan deploy-build
-          git add -A
-          git commit -q -m "Build of ${GITHUB_SHA::7}: $(printf '%s' "${COMMIT_MSG:-manual run}" | head -n1 | cut -c1-72)"
-          git push -f origin HEAD:deploy
+          missing=""
+          [ -n "$K" ] || missing="$missing SSH_PRIVATE_KEY"
+          [ -n "$H" ] || missing="$missing SSH_HOST"
+          [ -n "$P" ] || missing="$missing SSH_PORT"
+          [ -n "$U" ] || missing="$missing SSH_USER"
+          [ -n "$D" ] || missing="$missing DB_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Tests passed, but these repository secrets are missing:$missing (Settings → Secrets and variables → Actions)"
+            exit 1
+          fi
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Trust the server's host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Create academy.env on the server (first deploy only)
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          SSH_TARGET: ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          if ssh -p "$SSH_PORT" "$SSH_TARGET" "test -f $SITE_DIR/academy.env"; then
+            echo "academy.env already exists on the server; leaving it unchanged."
+            exit 0
+          fi
+          php -r '
+            $lines = file(".env.example", FILE_IGNORE_NEW_LINES);
+            $set = [
+              "DB_DATABASE" => getenv("DB_DATABASE"),
+              "DB_USERNAME" => getenv("DB_USERNAME"),
+              "DB_PASSWORD" => "\"".addcslashes(getenv("DB_PASSWORD"), "\"\\\$")."\"",
+            ];
+            foreach ($lines as &$l) {
+              foreach ($set as $k => $v) { if (str_starts_with($l, "$k=")) { $l = "$k=$v"; } }
+            }
+            file_put_contents("academy.env.new", implode("\n", $lines)."\n");
+          '
+          scp -P "$SSH_PORT" academy.env.new "$SSH_TARGET:$SITE_DIR/academy.env"
+          ssh -p "$SSH_PORT" "$SSH_TARGET" "chmod 600 $SITE_DIR/academy.env"
+          rm -f academy.env.new
+          echo "Created $SITE_DIR/academy.env"
+
+      - name: Sync files to the server
+        run: |
+          rsync -az --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='tests' \
+            --exclude='phpunit.xml' \
+            --exclude='.env' \
+            --exclude='.well-known' \
+            --exclude='.user.ini' \
+            --exclude='storage/app/public' \
+            --exclude='storage/framework' \
+            --exclude='storage/logs' \
+            --exclude='bootstrap/cache' \
+            --exclude='public/storage' \
+            -e "ssh -p ${{ secrets.SSH_PORT }}" \
+            ./ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ env.DEPLOY_PATH }}/"
+
+      - name: Set up app key, migrate and rebuild caches
+        run: |
+          ssh -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" "
+            set -e
+            cd ${{ env.DEPLOY_PATH }}
+            mkdir -p storage/app/public storage/framework/sessions storage/framework/views storage/framework/cache/data storage/logs bootstrap/cache
+            if grep -q '^APP_KEY=\$' ../academy.env; then ${{ env.REMOTE_PHP }} artisan key:generate --force; fi
+            ${{ env.REMOTE_PHP }} artisan config:clear
+            ${{ env.REMOTE_PHP }} artisan migrate --force
+            ${{ env.REMOTE_PHP }} artisan route:clear
+            ${{ env.REMOTE_PHP }} artisan view:clear
+            ${{ env.REMOTE_PHP }} artisan cache:clear
+            ${{ env.REMOTE_PHP }} artisan config:cache
+            ${{ env.REMOTE_PHP }} artisan route:cache
+            ${{ env.REMOTE_PHP }} artisan view:cache
+            ${{ env.REMOTE_PHP }} artisan about --only=environment
+          "
+
+      - name: Check the live site
+        run: |
+          sleep 3
+          code=$(curl -s -o /dev/null -w '%{http_code}' https://academy.integris.my/up || true)
+          echo "https://academy.integris.my/up returned $code"
+          [ "$code" = "200" ] || { echo "::warning::Health check did not return 200"; }
