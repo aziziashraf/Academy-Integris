@@ -30,18 +30,22 @@
 </nav>
 <div class="toast" id="toast"></div>
 <form id="logoutForm" method="POST" action="{{ route('logout') }}" style="display:none">@csrf</form>
+@php
+    $academyUser = auth()->user();
+    $academyConfig = [
+        'user' => $academyUser ? ['id' => $academyUser->id, 'name' => $academyUser->name, 'email' => $academyUser->email] : null,
+        'csrf' => csrf_token(),
+        'welcome' => (bool) session('welcome'),
+        'routes' => [
+            'progress' => route('progress.update', [], false),
+            'login' => route('login', [], false),
+            'register' => route('register', [], false),
+        ],
+        'audioBase' => asset('audio').'/',
+    ];
+@endphp
 <script>
-window.ACADEMY = @json([
-    'user' => auth()->user() ? ['id' => auth()->id(), 'name' => auth()->user()->name, 'email' => auth()->user()->email] : null,
-    'csrf' => csrf_token(),
-    'welcome' => (bool) session('welcome'),
-    'routes' => [
-        'progress' => route('progress.update', absolute: false),
-        'login' => route('login', absolute: false),
-        'register' => route('register', absolute: false),
-    ],
-    'audioBase' => asset('audio').'/',
-]);
+window.ACADEMY = {{ \Illuminate\Support\Js::from($academyConfig) }};
 </script>
 <script src="{{ asset('js/academy-data.js') }}?v=3"></script>
 <script src="{{ asset('js/audio-manifest.js') }}?v=3"></script>

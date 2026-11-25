@@ -13,7 +13,8 @@ class ProgressController extends Controller
 
     public function show(Request $request): JsonResponse
     {
-        $progress = $request->user()->progress;
+        // Always read fresh from the database.
+        $progress = LearningProgress::where('user_id', $request->user()->id)->first();
 
         return response()->json([
             'state' => $progress?->state,
