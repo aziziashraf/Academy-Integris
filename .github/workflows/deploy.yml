@@ -117,18 +117,18 @@ jobs:
       - name: Sync files to the server
         run: |
           rsync -az --delete \
-            --exclude='.git' \
-            --exclude='.github' \
-            --exclude='tests' \
-            --exclude='phpunit.xml' \
-            --exclude='.env' \
-            --exclude='.well-known' \
-            --exclude='.user.ini' \
-            --exclude='storage/app/public' \
-            --exclude='storage/framework' \
-            --exclude='storage/logs' \
-            --exclude='bootstrap/cache' \
-            --exclude='public/storage' \
+            --exclude='/.git' \
+            --exclude='/.github' \
+            --exclude='/tests' \
+            --exclude='/phpunit.xml' \
+            --exclude='/.env' \
+            --exclude='/.well-known' \
+            --exclude='/.user.ini' \
+            --exclude='/storage/app/public' \
+            --exclude='/storage/framework' \
+            --exclude='/storage/logs' \
+            --exclude='/bootstrap/cache' \
+            --exclude='/public/storage' \
             -e "ssh -p ${{ secrets.SSH_PORT }}" \
             ./ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ env.DEPLOY_PATH }}/"
 
@@ -138,6 +138,9 @@ jobs:
             set -e
             cd ${{ env.DEPLOY_PATH }}
             mkdir -p storage/app/public storage/framework/sessions storage/framework/views storage/framework/cache/data storage/logs bootstrap/cache
+            # Drop cached package/config/route lists so they're rebuilt for the packages just deployed
+            rm -f bootstrap/cache/packages.php bootstrap/cache/services.php bootstrap/cache/config.php bootstrap/cache/routes-v7.php
+            ${{ env.REMOTE_PHP }} artisan package:discover
             if grep -q '^APP_KEY=\$' ../academy.env; then ${{ env.REMOTE_PHP }} artisan key:generate --force; fi
             ${{ env.REMOTE_PHP }} artisan config:clear
             ${{ env.REMOTE_PHP }} artisan migrate --force
