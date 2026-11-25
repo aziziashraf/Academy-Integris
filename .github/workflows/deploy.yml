@@ -1,0 +1,56 @@
+name: Test & build for Hostinger
+
+# On every push to main: run the tests, install production packages,
+# and publish the ready-to-serve result to the "deploy" branch.
+# Hostinger's Git deployment pulls the "deploy" branch (it does not run Composer itself).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, intl, pdo_mysql, pdo_sqlite, bcmath, fileinfo
+          coverage: none
+
+      - name: Install all packages (for tests)
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run tests
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          php artisan test
+
+      - name: Install production packages only
+        run: |
+          rm -f .env
+          composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-progress
+
+      - name: Publish to the deploy branch
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          sed -i '/^\/vendor$/d' .gitignore
+          rm -rf .github tests phpunit.xml
+          git checkout --orphan deploy-build
+          git add -A
+          git commit -q -m "Build of ${GITHUB_SHA::7}: $(printf '%s' "${COMMIT_MSG:-manual run}" | head -n1 | cut -c1-72)"
+          git push -f origin HEAD:deploy
